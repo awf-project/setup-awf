@@ -1,0 +1,129 @@
+name: 'Setup AWF'
+description: 'Install AWF CLI and optional plugins for GitHub Actions runners'
+branding:
+  icon: 'terminal'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'AWF version to install (e.g. "1.2.0", "v1.2.0", or "latest")'
+    required: false
+    default: 'latest'
+  plugins:
+    description: 'Multi-line list of plugins to install (owner/repo@version format)'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token for downloading releases (default: github.token)'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: 'Installed AWF version'
+    value: ${{ steps.set-outputs.outputs.version }}
+  path:
+    description: 'Path to AWF binary'
+    value: ${{ steps.set-outputs.outputs.path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect platform
+      id: platform
+      shell: bash
+      run: |
+        case "${{ runner.os }}" in
+          Linux)  os="linux" ;;
+          macOS)  os="darwin" ;;
+          *)      echo "::error::Unsupported OS: ${{ runner.os }}"; exit 1 ;;
+        esac
+        case "${{ runner.arch }}" in
+          X64)    arch="amd64" ;;
+          ARM64)  arch="arm64" ;;
+          *)      echo "::error::Unsupported arch: ${{ runner.arch }}"; exit 1 ;;
+        esac
+        echo "os=${os}" >> "$GITHUB_OUTPUT"
+        echo "arch=${arch}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve AWF version
+      id: resolve-version
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        version="${INPUT_VERSION#v}"
+        if [ "${version}" = "latest" ]; then
+          version=$(curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/awf-project/cli/releases/latest" \
+            | grep '"tag_name"' | sed 's/.*"v\?\([^"]*\)".*/\1/')
+          if [ -z "${version}" ]; then
+            echo "::error::Failed to resolve latest AWF version"
+            exit 1
+          fi
+        fi
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "::notice::AWF version resolved to ${version}"
+
+    - name: Cache AWF binary
+      id: cache-awf
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/awf-bin
+        key: awf-${{ steps.resolve-version.outputs.version }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.arch }}
+
+    - name: Install AWF
+      id: install-awf
+      if: steps.cache-awf.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        AWF_VERSION: ${{ steps.resolve-version.outputs.version }}
+        AWF_OS: ${{ steps.platform.outputs.os }}
+        AWF_ARCH: ${{ steps.platform.outputs.arch }}
+        AWF_INSTALL_DIR: ${{ runner.temp }}/awf-bin
+      run: ${{ github.action_path }}/scripts/install-awf.sh
+
+    - name: Add AWF to PATH
+      shell: bash
+      run: |
+        echo "${{ runner.temp }}/awf-bin" >> "$GITHUB_PATH"
+
+    - name: Set AWF outputs
+      id: set-outputs
+      shell: bash
+      run: |
+        echo "version=${{ steps.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
+        echo "path=${{ runner.temp }}/awf-bin/awf" >> "$GITHUB_OUTPUT"
+
+    - name: Compute plugins cache key
+      id: plugins-key
+      if: inputs.plugins != ''
+      shell: bash
+      run: |
+        hash=$(echo "${{ inputs.plugins }}" | sha256sum | cut -d' ' -f1)
+        echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache plugins
+      id: cache-plugins
+      if: inputs.plugins != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/awf-plugins
+        key: awf-plugins-${{ steps.plugins-key.outputs.hash }}-${{ steps.platform.outputs.os }}-${{ steps.platform.outputs.arch }}
+
+    - name: Install plugins
+      if: inputs.plugins != '' && steps.cache-plugins.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        AWF_PLUGINS_PATH: ${{ runner.temp }}/awf-plugins
+        INPUT_PLUGINS: ${{ inputs.plugins }}
+      run: ${{ github.action_path }}/scripts/install-plugins.sh
+
+    - name: Set plugins path
+      if: inputs.plugins != ''
+      shell: bash
+      run: |
+        echo "AWF_PLUGINS_PATH=${{ runner.temp }}/awf-plugins" >> "$GITHUB_ENV"
